@@ -41,22 +41,22 @@ type ServerPool struct {
 // }
 
 func NewBackend(rawURL string) (*Backend, error) {
-	url, err := url.Parse(rawURL)
+	BackendURL, err := url.Parse(rawURL)
 	if err != nil {
 		return nil, err
 	}
 
-	if url.Scheme != "http" && url.Scheme != "https" {
-		return nil, fmt.Errorf("unsupported backend URL scheme: %q", url.Scheme)
+	if BackendURL.Scheme != "http" && BackendURL.Scheme != "https" {
+		return nil, fmt.Errorf("unsupported backend URL scheme: %q", BackendURL.Scheme)
 	}
 
-	if url.Host == "" {
+	if BackendURL.Host == "" {
 		return nil, fmt.Errorf("backend URL must have a host")
 	}
 
-	reverseProxy := httputil.NewSingleHostReverseProxy(url)
+	reverseProxy := httputil.NewSingleHostReverseProxy(BackendURL)
 	backend := &Backend{
-		URL:          url,
+		URL:          BackendURL,
 		Alive:        true,
 		ReverseProxy: reverseProxy,
 	}
@@ -78,11 +78,11 @@ func NewServerPool(backends ...*Backend) *ServerPool {
 			r *http.Request,
 			err error,
 		) {
-			log.Printf("[%s] %v, b.URL.Host, err")
+			log.Printf("[%s] %v", b.URL.Host, err)
 
 			retries := getRetriesFromContext(r)
 
-			if retries < 3 {
+			if retries > 3 {
 				time.Sleep(10 * time.Millisecond)
 
 				ctx := context.WithValue(
@@ -202,11 +202,11 @@ func getAttemptsFromContext(r *http.Request) int {
 }
 
 func getRetriesFromContext(r *http.Request) int {
-	retires, ok := r.Context().Value(retriesKey).(int)
+	retries, ok := r.Context().Value(retriesKey).(int)
 	if !ok {
 		return 0
 	}
-	return retires
+	return retries
 }
 
 func isBackendAlive(u *url.URL) bool {
