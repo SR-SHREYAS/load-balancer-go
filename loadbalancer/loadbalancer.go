@@ -1,12 +1,23 @@
 package loadbalancer
 
 import (
+	"context"
 	"fmt"
+	"log"
+	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
 	"sync"
 	"sync/atomic"
+	"time"
+)
+
+type contextKey int
+
+const (
+	attemptsKey contextKey = iota
+	retriesKey
 )
 
 type Backend struct {
@@ -54,10 +65,62 @@ func NewBackend(rawURL string) (*Backend, error) {
 }
 
 func NewServerPool(backends ...*Backend) *ServerPool {
-	return &ServerPool{
+	pool := &ServerPool{
 		backends: backends,
 		current:  0,
 	}
+
+	for _, backend := range pool.backends {
+		b := backend
+
+		b.ReverseProxy.ErrorHandler = func(
+			w http.ResponseWriter,
+			r *http.Request,
+			err error,
+		) {
+			log.Printf("[%s] %v, b.URL.Host, err")
+
+			retries := getRetriesFromContext(r)
+
+			if retries < 3 {
+				time.Sleep(10 * time.Millisecond)
+
+				ctx := context.WithValue(
+					r.Context(),
+					retriesKey,
+					retries+1,
+				)
+
+				b.ReverseProxy.ServeHTTP(w, r.WithContext(ctx))
+				return
+			}
+
+			// the retries for this backend have been exhausted.
+			b.SetAlive(false)
+
+			attempts := getAttemptsFromContext(r)
+
+			log.Printf(
+				"%s (%s) : backend %s failed; switching backend (attempt %d)",
+				r.RemoteAddr,
+				r.URL.Path,
+				b.URL.Host,
+				attempts+1,
+			)
+
+			ctx := context.WithValue(
+				r.Context(),
+				attemptsKey,
+				attempts+1,
+			)
+
+			ctx = context.WithValue(ctx, retriesKey, 0)
+
+			pool.ServeHTTP(w, r.WithContext(ctx))
+		}
+	}
+
+	return pool
 }
 
 func (s *ServerPool) NextIndex() int {
@@ -100,10 +163,86 @@ func (b *Backend) IsAlive() (alive bool) {
 
 // lb load balances the incoming request
 func (s *ServerPool) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	attempts := getAttemptsFromContext(r)
+
+	if attempts > 3 {
+		log.Printf(
+			"%s (%s): maximum backend attempts reached",
+			r.RemoteAddr,
+			r.URL.Path,
+		)
+
+		http.Error(
+			w,
+			"Service not available",
+			http.StatusServiceUnavailable,
+		)
+		return
+	}
+
 	peer := s.GetNextPeer()
 	if peer != nil {
 		peer.ReverseProxy.ServeHTTP(w, r)
 		return
 	}
-	http.Error(w, "Service not available", http.StatusServiceUnavailable)
+
+	http.Error(
+		w,
+		"Service not available",
+		http.StatusServiceUnavailable,
+	)
+}
+
+func getAttemptsFromContext(r *http.Request) int {
+	attempts, ok := r.Context().Value(attemptsKey).(int)
+	if !ok {
+		return 0
+	}
+	return attempts
+}
+
+func getRetriesFromContext(r *http.Request) int {
+	retires, ok := r.Context().Value(retriesKey).(int)
+	if !ok {
+		return 0
+	}
+	return retires
+}
+
+func isBackendAlive(u *url.URL) bool {
+	timeout := 2 * time.Second
+
+	conn, err := net.DialTimeout("tcp", u.Host, timeout)
+	if err != nil {
+		return false
+	}
+
+	_ = conn.Close()
+	return true
+}
+
+func (s *ServerPool) HealthCheck() {
+	for _, b := range s.backends {
+		alive := isBackendAlive(b.URL)
+
+		b.SetAlive(alive)
+
+		status := "down"
+		if alive {
+			status = "up"
+		}
+
+		log.Printf("%s [%s]", b.URL.Host, status)
+	}
+}
+
+func (s *ServerPool) RunHealthChecks(interval time.Duration) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for range ticker.C {
+		log.Println("Starting health check...")
+		s.HealthCheck()
+		log.Println("Health check completed")
+	}
 }

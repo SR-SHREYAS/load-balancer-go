@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"net/http"
+	"time"
 
 	"github.com/SR-SHREYAS/load-balancer-go/loadbalancer"
 	"github.com/SR-SHREYAS/load-balancer-go/router"
@@ -33,6 +34,8 @@ func main() {
 		backend2,
 		backend3,
 	)
+
+	go pool.RunHealthChecks(10 * time.Second)
 
 	// the router receives the pool as a HTTP handler
 	mux := router.RegisterRoutes(pool)
