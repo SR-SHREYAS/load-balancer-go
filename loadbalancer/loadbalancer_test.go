@@ -455,3 +455,88 @@ func TestConcurrentTrafficDistribution(t *testing.T) {
 		}
 	}
 }
+
+// backend failure while incoming traffic test
+func TestBackendFailureDuringTraffic(t *testing.T) {
+	var backend1Count atomic.Int64
+	var backend2Count atomic.Int64
+	var backend3Count atomic.Int64
+
+	createServer := func(name string, counter *atomic.Int64) *httptest.Server {
+		return httptest.NewServer(http.HandlerFunc(
+			func(w http.ResponseWriter, r *http.Request) {
+				counter.Add(1)
+				_, _ = w.Write([]byte(name))
+			},
+		))
+	}
+
+	server1 := createServer("backend-1", &backend1Count)
+	defer server1.Close()
+
+	server2 := createServer("backend-2", &backend2Count)
+	defer server2.Close()
+
+	server3 := createServer("backend-3", &backend3Count)
+	defer server3.Close()
+
+	backend1 := createTestBackend(t, server1.URL)
+	backend2 := createTestBackend(t, server2.URL)
+	backend3 := createTestBackend(t, server3.URL)
+
+	pool := NewServerPool(backend1, backend2, backend3)
+
+	sendRequest := func() *httptest.ResponseRecorder {
+		request := httptest.NewRequest(http.MethodGet, "/test", nil)
+		recorder := httptest.NewRecorder()
+
+		pool.ServeHTTP(recorder, request)
+
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("expected status 200, got %d", recorder.Code)
+		}
+		return recorder
+	}
+
+	for i := 0; i < 3; i++ {
+		sendRequest()
+	}
+
+	if backend1Count.Load() != 1 ||
+		backend2Count.Load() != 1 ||
+		backend3Count.Load() != 1 {
+		t.Fatalf("initial traffic was not distributed across all backends")
+	}
+
+	server1.Close()
+	recorder := sendRequest()
+
+	if recorder.Body.String() != "backend-2" {
+		t.Errorf(
+			"expected failover to backend-2 , got %q",
+			recorder.Body.String(),
+		)
+	}
+
+	if backend1.IsAlive() {
+		t.Errorf("expected backend-1 to be maked down")
+	}
+
+	for i := 0; i < 6; i++ {
+		sendRequest()
+	}
+
+	if backend2Count.Load() <= 1 {
+		t.Errorf("expected backend-2 to receive additional traffic")
+	}
+
+	if backend3Count.Load() <= 1 {
+		t.Errorf("expected backend-3 to receive additional traffic")
+	}
+
+	if backend1Count.Load() != 1 {
+		t.Errorf("expected backend-1 to not receive any additional traffic")
+	}
+}
+
+//
