@@ -9,7 +9,6 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"sync"
-	"sync/atomic"
 	"time"
 )
 
@@ -28,8 +27,9 @@ type Backend struct {
 }
 
 type ServerPool struct {
-	backends []*Backend
-	current  uint64
+	backends    []*Backend
+	current     uint64
+	selectionMu sync.Mutex
 }
 
 // func NewReverseProxy() http.Handler {
@@ -82,7 +82,7 @@ func NewServerPool(backends ...*Backend) *ServerPool {
 
 			retries := getRetriesFromContext(r)
 
-			if retries > 3 {
+			if retries < 3 {
 				time.Sleep(10 * time.Millisecond)
 
 				ctx := context.WithValue(
@@ -123,25 +123,46 @@ func NewServerPool(backends ...*Backend) *ServerPool {
 	return pool
 }
 
-func (s *ServerPool) NextIndex() int {
-	return int(atomic.AddUint64(&s.current, uint64(1)) % uint64(len(s.backends)))
-}
+// func (s *ServerPool) NextIndex() int {
+// 	return int(atomic.AddUint64(&s.current, uint64(1)) % uint64(len(s.backends)))
+// }
+
+// func (s *ServerPool) GetNextPeer() *Backend {
+// 	if len(s.backends) == 0 {
+// 		return nil
+// 	}
+
+// 	// loop entire backends to find alive backend
+// 	next := s.NextIndex()
+// 	l := len(s.backends) + next // start from the next and move a full cycle
+// 	for i := next; i < l; i++ {
+// 		idx := i % len(s.backends) // take an index by modding with length
+// 		// if we have an alive backend, use it and store if its not the original one
+// 		if s.backends[idx].IsAlive() {
+// 			if i != next {
+// 				atomic.StoreUint64(&s.current, uint64(idx)) // mark the current one
+// 			}
+// 			return s.backends[idx]
+// 		}
+// 	}
+// 	return nil
+// }
 
 func (s *ServerPool) GetNextPeer() *Backend {
+	s.selectionMu.Lock()
+	defer s.selectionMu.Unlock()
+
 	if len(s.backends) == 0 {
 		return nil
 	}
 
-	// loop entire backends to find alive backend
-	next := s.NextIndex()
-	l := len(s.backends) + next // start from the next and move a full cycle
-	for i := next; i < l; i++ {
-		idx := i % len(s.backends) // take an index by modding with length
-		// if we have an alive backend, use it and store if its not the original one
+	for i := 0; i < len(s.backends); i++ {
+		idx := s.current
+
+		// Advance the position for the next selection
+		s.current = (s.current + 1) % uint64(len(s.backends))
+
 		if s.backends[idx].IsAlive() {
-			if i != next {
-				atomic.StoreUint64(&s.current, uint64(idx)) // mark the current one
-			}
 			return s.backends[idx]
 		}
 	}

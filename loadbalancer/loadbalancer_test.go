@@ -251,7 +251,7 @@ func TestServeHTTPFailsOverToHealthyBackend(t *testing.T) {
 	// the failed backend is deliberately placed second
 	// the current round robin selection implements from 1st index forward
 
-	pool := NewServerPool(healthyBackend, failedBackend)
+	pool := NewServerPool(failedBackend, healthyBackend)
 
 	// send a request through LB
 	request := httptest.NewRequest(http.MethodGet, "/test", nil)
