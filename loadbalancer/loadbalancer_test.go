@@ -1,8 +1,11 @@
 package loadbalancer
 
 import (
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"sync"
+	"sync/atomic"
 	"testing"
 )
 
@@ -284,5 +287,171 @@ func TestServeHTTPFailsOverToHealthyBackend(t *testing.T) {
 	// verify healthy backend are remains available
 	if !healthyBackend.IsAlive() {
 		t.Error("expected healthy backend to be marked as alive but it is marked as down")
+	}
+}
+
+// traffic test
+func TestTrafficDistribution(t *testing.T) {
+	// create counters for each backend
+	var backend1Count atomic.Int64
+	var backend2Count atomic.Int64
+	var backend3Count atomic.Int64
+
+	// create 3 temp http servers
+	createServer := func(name string, counter *atomic.Int64) *httptest.Server {
+		return httptest.NewServer(http.HandlerFunc(
+			func(w http.ResponseWriter, r *http.Request) {
+				counter.Add(1)
+				_, _ = w.Write([]byte(name))
+			},
+		))
+	}
+
+	server1 := createServer("backend-1", &backend1Count)
+	defer server1.Close()
+
+	server2 := createServer("backend-2", &backend2Count)
+	defer server2.Close()
+
+	server3 := createServer("backend-3", &backend3Count)
+	defer server3.Close()
+
+	// creating backends and server pool
+	backend1 := createTestBackend(t, server1.URL)
+	backend2 := createTestBackend(t, server2.URL)
+	backend3 := createTestBackend(t, server3.URL)
+
+	pool := NewServerPool(backend1, backend2, backend3)
+
+	// 300 sequential requests
+	const totalRequests = 300
+
+	for i := 0; i < totalRequests; i++ {
+		request := httptest.NewRequest(http.MethodGet, "/test", nil)
+		recorder := httptest.NewRecorder()
+
+		pool.ServeHTTP(recorder, request)
+
+		if recorder.Code != http.StatusOK {
+			t.Fatalf(
+				"request %d: expected status 200, got %d",
+				i+1,
+				recorder.Code,
+			)
+		}
+	}
+
+	// verify traffic distribution
+	expected := int64(totalRequests / 3)
+
+	results := []struct {
+		name  string
+		count int64
+	}{
+		{"backend-1", backend1Count.Load()},
+		{"backend-2", backend2Count.Load()},
+		{"backend-3", backend3Count.Load()},
+	}
+
+	for _, result := range results {
+		if result.count != expected {
+			t.Errorf(
+				" %s: expected %d requests, got %d",
+				result.name,
+				expected,
+				result.count,
+			)
+		}
+	}
+}
+
+// concurrent request test
+func TestConcurrentTrafficDistribution(t *testing.T) {
+	// create counters for each backend
+	var backend1Count atomic.Int64
+	var backend2Count atomic.Int64
+	var backend3Count atomic.Int64
+
+	createServer := func(name string, counter *atomic.Int64) *httptest.Server {
+		return httptest.NewServer(http.HandlerFunc(
+			func(w http.ResponseWriter, r *http.Request) {
+				counter.Add(1)
+				_, _ = w.Write([]byte(name))
+			},
+		))
+	}
+
+	server1 := createServer("backend-1", &backend1Count)
+	defer server1.Close()
+
+	server2 := createServer("backend-2", &backend2Count)
+	defer server2.Close()
+
+	server3 := createServer("backend-3", &backend3Count)
+	defer server3.Close()
+
+	// creating backends and server pool
+	backend1 := createTestBackend(t, server1.URL)
+	backend2 := createTestBackend(t, server2.URL)
+	backend3 := createTestBackend(t, server3.URL)
+
+	pool := NewServerPool(backend1, backend2, backend3)
+
+	const totalRequests = 300
+
+	var wg sync.WaitGroup
+	errors := make(chan error, totalRequests)
+
+	for i := 0; i < totalRequests; i++ {
+		wg.Add(1)
+
+		go func() {
+			defer wg.Done()
+
+			request := httptest.NewRequest(
+				http.MethodGet,
+				"/test",
+				nil,
+			)
+			recorder := httptest.NewRecorder()
+
+			pool.ServeHTTP(recorder, request)
+
+			if recorder.Code != http.StatusOK {
+				errors <- fmt.Errorf(
+					"expected status 200, got %d",
+					recorder.Code,
+				)
+			}
+		}()
+	}
+
+	wg.Wait()
+	close(errors)
+
+	for err := range errors {
+		t.Error(err)
+	}
+
+	expected := int64(totalRequests / 3)
+
+	results := []struct {
+		name  string
+		count int64
+	}{
+		{"backend-1", backend1Count.Load()},
+		{"backend-2", backend2Count.Load()},
+		{"backend-3", backend3Count.Load()},
+	}
+
+	for _, result := range results {
+		if result.count != expected {
+			t.Errorf(
+				"%s: expected %d requests, got %d",
+				result.name,
+				expected,
+				result.count,
+			)
+		}
 	}
 }

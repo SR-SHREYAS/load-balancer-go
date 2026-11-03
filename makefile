@@ -16,4 +16,5 @@ test: vet
 	@go test ./loadbalancer -v -count=1
 
 race: 
-	go test -race ./loadbalancer -v
+	@go test -race -count=1 ./...
+	@go test -race ./loadbalancer -v
